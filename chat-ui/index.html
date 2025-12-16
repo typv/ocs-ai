@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OcsAI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: ui-sans-serif, system-ui, sans-serif; }
+        #chatOutput { white-space: pre-wrap; overflow-wrap: break-word; }
+        .gemini-icon {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #4285F4, #34A853, #FBBC05, #EA4335);
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col items-center pt-8 md:pt-16">
+    <div class="container w-full max-w-4xl bg-white p-6 md:p-8 rounded-xl shadow-lg border border-gray-200">
+
+        <h2 class="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+            <svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+            OcsAI
+        </h2>
+
+        <div class="mb-4 text-xs text-gray-500 border-b border-gray-100 pb-2 flex justify-between items-center">
+            <p id="statusArea" class="font-medium text-gray-700">Ready</p>
+        </div>
+
+        <div id="chatOutput" class="h-[550px] overflow-y-auto p-4 mb-4 bg-white text-base">
+            <p class="text-gray-400 italic">Enter a query to start.</p>
+        </div>
+
+        <div class="flex gap-3 bg-white p-3 border border-gray-300 rounded-xl shadow-xl">
+            <input
+                type="text"
+                id="queryInput"
+                placeholder="Message the AI..."
+                class="flex-grow p-2 text-gray-700 outline-none focus:ring-0 border-none bg-white"
+            >
+            <button
+                id="sendButton"
+                type="button"
+                class="px-5 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition duration-150"
+            >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const THREAD_ID = "addeadf1-8411-4e12-94ce-3e783c218c3a";
+        const API_ENDPOINT = `/api/v1/chat/threads/${THREAD_ID}/runs/stream`;
+
+        const queryInput = document.getElementById('queryInput');
+        const sendButton = document.getElementById('sendButton');
+        const chatOutput = document.getElementById('chatOutput');
+        const statusArea = document.getElementById('statusArea');
+
+        let isStreaming = false;
+        let streamTarget = null;
+
+        function createPayload(query) {
+            return {
+                "input": {
+                    "messages": [
+                        {
+                            "id": crypto.randomUUID(),
+                            "type": "human",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": query
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "stream_mode": ["values", "messages", "custom"],
+                "stream_subgraphs": true,
+                "stream_resumable": true,
+                "assistant_id": "api/chat",
+                "on_disconnect": "continue"
+            };
+        }
+
+        async function handleStream() {
+            const query = queryInput.value.trim();
+            if (!query || isStreaming) return;
+
+            isStreaming = true;
+            sendButton.disabled = true;
+            statusArea.textContent = 'Thinking...';
+
+            queryInput.value = '';
+
+            if (chatOutput.querySelector('p.text-gray-400.italic')) {
+                chatOutput.innerHTML = '';
+            }
+
+            const userMessageContainer = document.createElement('div');
+            userMessageContainer.className = 'flex justify-end mb-8';
+
+            const userFlexContainer = document.createElement('div');
+            userFlexContainer.className = 'flex items-start';
+
+            const userTextDiv = document.createElement('div');
+            userTextDiv.className = 'bg-indigo-500 text-white p-3 rounded-xl rounded-br-lg max-w-3xl shadow-md';
+            userTextDiv.textContent = query;
+
+            userFlexContainer.appendChild(userTextDiv);
+            userMessageContainer.appendChild(userFlexContainer);
+            chatOutput.appendChild(userMessageContainer);
+
+            const aiMessageContainer = document.createElement('div');
+            aiMessageContainer.className = 'flex justify-start mb-8';
+
+            const aiContent = document.createElement('div');
+            aiContent.className = 'flex items-start max-w-3xl';
+
+            const geminiIcon = document.createElement('span');
+            geminiIcon.className = 'gemini-icon';
+            aiContent.appendChild(geminiIcon);
+
+            streamTarget = document.createElement('span');
+            streamTarget.className = 'bg-gray-100 text-gray-800 p-3 rounded-xl rounded-tl-lg shadow-sm whitespace-pre-wrap';
+
+            aiContent.appendChild(streamTarget);
+            aiMessageContainer.appendChild(aiContent);
+            chatOutput.appendChild(aiMessageContainer);
+
+            statusArea.textContent = 'Connecting...';
+            chatOutput.scrollTop = chatOutput.scrollHeight;
+
+            try {
+                const payload = createPayload(query);
+
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+
+                statusArea.textContent = 'Processing...';
+
+                const processBuffer = () => {
+                    let eventEnd;
+                    while ((eventEnd = buffer.indexOf('\n\n')) !== -1) {
+                        const eventData = buffer.substring(0, eventEnd);
+                        buffer = buffer.substring(eventEnd + 2);
+                        parseAndHandleEvent(eventData);
+                    }
+                };
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    processBuffer();
+                }
+
+                processBuffer();
+
+            } catch (error) {
+                if (streamTarget) {
+                    const errorSpan = document.createElement('span');
+                    errorSpan.className = 'text-red-500 font-medium ml-2';
+                    errorSpan.textContent = '[CONNECTION ERROR]';
+                    streamTarget.appendChild(errorSpan);
+                }
+                statusArea.textContent = 'Error: Connection lost.';
+            } finally {
+                isStreaming = false;
+                sendButton.disabled = false;
+                streamTarget = null;
+
+                if (!statusArea.textContent.includes('Error')) {
+                    statusArea.textContent = 'Ready';
+                }
+                chatOutput.scrollTop = chatOutput.scrollHeight;
+            }
+        }
+
+        function parseAndHandleEvent(eventData) {
+            const lines = eventData.split('\n');
+            let event = '';
+            let data = null;
+
+            const dataLine = lines.find(line => line.startsWith('data:'));
+
+            if (dataLine) {
+                try {
+                    data = JSON.parse(dataLine.substring(6).trim());
+                    if (data && data.event) event = data.event;
+                } catch { return; }
+            }
+
+            if (!data || !event || !streamTarget) return;
+
+            switch (event) {
+                case 'start':
+                    statusArea.textContent = 'Running...';
+                    break;
+                case 'stream':
+                    if (data.data && data.data.chunk) {
+                        const newTextNode = document.createTextNode(data.data.chunk);
+                        streamTarget.appendChild(newTextNode);
+                        chatOutput.scrollTop = chatOutput.scrollHeight;
+                    }
+                    break;
+                case 'end':
+                    if (data.state && data.state.answer) {
+                        streamTarget.textContent = data.state.answer;
+                    }
+                    statusArea.textContent = 'Ready';
+                    break;
+                case 'error':
+                    const errorSpan = document.createElement('span');
+                    errorSpan.className = 'text-red-500 font-medium ml-2';
+                    errorSpan.textContent = `[BACKEND ERROR: ${data.message}]`;
+                    streamTarget.appendChild(errorSpan);
+                    statusArea.textContent = 'Error: Backend';
+                    break;
+                case 'metadata':
+                    statusArea.textContent = data.step;
+                    break;
+            }
+        }
+
+        sendButton.addEventListener('click', () => {
+            handleStream();
+        });
+
+        queryInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                handleStream();
+            }
+        });
+
+        if (chatOutput.textContent.trim() === 'Enter a query to start.') {
+            chatOutput.innerHTML = '<p class="text-gray-400 italic">Enter a query to start.</p>';
+        }
+    </script>
+</body>
+</html>

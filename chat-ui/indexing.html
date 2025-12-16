@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OcsAI - indexing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: ui-sans-serif, system-ui, sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col items-center pt-8 md:pt-16">
+    <div class="container w-full max-w-xl bg-white p-6 md:p-8 rounded-xl shadow-lg border border-gray-200">
+
+        <div class="flex justify-between items-center mb-6 border-b border-gray-100 pb-4">
+            <h2 class="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                <svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                </svg>
+                Document Upload
+            </h2>
+            <a
+                href="/"
+                class="px-3 py-2 bg-indigo-500 text-white text-sm font-medium rounded-lg hover:bg-indigo-600 transition duration-150 flex items-center gap-1 shadow-md"
+            >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                </svg>
+                Back to Chat
+            </a>
+        </div>
+
+        <form id="uploadForm" class="space-y-6">
+            <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-indigo-400 transition duration-300 cursor-pointer" id="dropArea">
+                <input type="file" id="pdfFile" accept=".pdf" class="hidden" required>
+                <p class="text-gray-500 mb-2">Drag & drop your PDF file here, or</p>
+                <button type="button" id="selectFileButton" class="px-4 py-2 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600 transition duration-150">
+                    Select PDF File
+                </button>
+                <p id="fileName" class="text-sm text-gray-700 mt-2 font-medium"></p>
+            </div>
+
+            <button
+                id="submitButton"
+                type="submit"
+                class="w-full px-4 py-3 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition duration-150 flex items-center justify-center gap-2"
+                disabled
+            >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-4-4V5a2 2 0 012-2h14a2 2 0 012 2v14a2 2 0 01-2 2H7a4 4 0 01-4-4v-1"></path>
+                </svg>
+                Upload & Process
+            </button>
+        </form>
+
+        <div id="statusContainer" class="mt-8 space-y-3 p-4 bg-gray-100 rounded-lg hidden">
+            <p id="processStatus" class="font-medium text-gray-700">Status: Waiting for upload...</p>
+
+            <div class="w-full bg-gray-300 rounded-full h-2.5">
+                <div id="progressBar" class="bg-indigo-500 h-2.5 rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
+            </div>
+            <p id="progressPercent" class="text-sm text-right text-gray-600">0%</p>
+        </div>
+
+        <div id="resultMessage" class="mt-4 p-3 rounded-lg text-sm hidden"></div>
+
+    </div>
+
+    <script>
+        const API_ENDPOINT = '/api/v1/indexing/upload-pdf';
+
+        const pdfFile = document.getElementById('pdfFile');
+        const uploadForm = document.getElementById('uploadForm');
+        const submitButton = document.getElementById('submitButton');
+        const selectFileButton = document.getElementById('selectFileButton');
+        const dropArea = document.getElementById('dropArea');
+        const fileName = document.getElementById('fileName');
+
+        const statusContainer = document.getElementById('statusContainer');
+        const processStatus = document.getElementById('processStatus');
+        const progressBar = document.getElementById('progressBar');
+        const progressPercent = document.getElementById('progressPercent');
+        const resultMessage = document.getElementById('resultMessage');
+
+        // --- File Selection Handlers ---
+        selectFileButton.addEventListener('click', () => {
+            pdfFile.click();
+        });
+
+        pdfFile.addEventListener('change', () => {
+            if (pdfFile.files.length > 0) {
+                const file = pdfFile.files[0];
+                fileName.textContent = `Selected: ${file.name}`;
+                submitButton.disabled = false;
+            } else {
+                fileName.textContent = '';
+                submitButton.disabled = true;
+            }
+        });
+
+        // --- Drag and Drop Handlers ---
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, () => dropArea.classList.add('border-indigo-500'), false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, () => dropArea.classList.remove('border-indigo-500'), false);
+        });
+
+        dropArea.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+
+            if (files.length === 1 && files[0].type === 'application/pdf') {
+                pdfFile.files = files;
+                pdfFile.dispatchEvent(new Event('change'));
+            } else {
+                alert('Please drop only one PDF file.');
+            }
+        }
+
+
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (pdfFile.files.length === 0) return;
+
+            const file = pdfFile.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            submitButton.disabled = true;
+            statusContainer.classList.remove('hidden');
+            resultMessage.classList.add('hidden');
+            resultMessage.textContent = '';
+
+            processStatus.textContent = `Status: Uploading ${file.name}...`;
+            progressBar.style.width = '0%';
+            progressPercent.textContent = '0%';
+
+            try {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', API_ENDPOINT);
+
+                xhr.upload.addEventListener('progress', (event) => {
+                    if (event.lengthComputable) {
+                        const percent = Math.round((event.loaded / event.total) * 100);
+                        progressBar.style.width = `${percent}%`;
+                        progressPercent.textContent = `${percent}%`;
+                        processStatus.textContent = `Status: Uploading (${percent}%)...`;
+                    }
+                });
+
+                xhr.onload = function() {
+                    submitButton.disabled = false;
+
+                    if (xhr.status === 200 || xhr.status === 201) {
+                        const response = JSON.parse(xhr.responseText);
+
+                        processStatus.textContent = 'Status: Processing complete!';
+                        progressBar.classList.remove('bg-indigo-500');
+                        progressBar.classList.add('bg-green-500');
+                        progressBar.style.width = '100%';
+                        progressPercent.textContent = '100%';
+
+                        resultMessage.classList.remove('hidden', 'bg-red-100', 'text-red-800');
+                        resultMessage.classList.add('bg-green-100', 'text-green-800');
+                        resultMessage.innerHTML = `<strong>SUCCESS:</strong> Document processed successfully.<br>Chunk added: ${response.chunks_added || 'N/A'}.`;
+
+                        pdfFile.value = '';
+                        fileName.textContent = '';
+
+                    } else {
+                        const errorResponse = JSON.parse(xhr.responseText);
+                        processStatus.textContent = 'Status: Failed!';
+                        progressBar.classList.remove('bg-indigo-500');
+                        progressBar.classList.add('bg-red-500');
+
+                        resultMessage.classList.remove('hidden', 'bg-green-100', 'text-green-800');
+                        resultMessage.classList.add('bg-red-100', 'text-red-800');
+                        resultMessage.innerHTML = `<strong>ERROR (${xhr.status}):</strong> ${errorResponse.detail || 'Unknown server error.'}`;
+                    }
+                };
+
+                xhr.onerror = function() {
+                    submitButton.disabled = false;
+                    processStatus.textContent = 'Status: Network Error!';
+                    progressBar.classList.remove('bg-indigo-500');
+                    progressBar.classList.add('bg-red-500');
+
+                    resultMessage.classList.remove('hidden', 'bg-green-100', 'text-green-800');
+                    resultMessage.classList.add('bg-red-100', 'text-red-800');
+                    resultMessage.textContent = 'Network error during upload. Please check your connection.';
+                };
+
+                xhr.send(formData);
+
+            } catch (error) {
+                console.error("Upload error:", error);
+                submitButton.disabled = false;
+                processStatus.textContent = 'Status: Client-side Error!';
+            }
+        });
+
+    </script>
+</body>
+</html>

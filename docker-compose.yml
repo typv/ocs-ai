@@ -1,0 +1,45 @@
+services:
+  app:
+    build: .
+    ports:
+      - "28000:80"
+    container_name: fastapi-app
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+
+  chromadb:
+    image: chromadb/chroma:1.3.6.dev46
+    container_name: chromadb
+    ports:
+      - "28001:8000"
+    volumes:
+      - ./.docker/volumes/chroma-data:/data
+    environment:
+      - CHROMA_OPEN_TELEMETRY__ENDPOINT=http://otel-collector:4317/
+      - CHROMA_OPEN_TELEMETRY__SERVICE_NAME=chroma
+    depends_on:
+      - otel-collector
+      - zipkin
+    restart: unless-stopped
+
+  zipkin:
+    image: openzipkin/zipkin
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    depends_on: [ otel-collector ]
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: otel-collector
+    command: [ "--config=/etc/otel-collector-config.yaml" ]
+    volumes:
+      - ./.docker/config/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    restart: unless-stopped
+
+volumes:
+  chroma-data:
