@@ -9,7 +9,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import HumanMessage
 from langchain.agents import create_agent
+from flashrank import Ranker, RerankRequest
 
+from .search_result import SearchResult
 # Import logic from other modules
 from .state_types import RAGState
 from .llm_tools import search_web
@@ -20,6 +22,7 @@ from .chat_enum import RAGDecision, RAGNode, SearchStrategy
 from .document_searcher import DocumentSearcher
 
 logger = logging.getLogger(__name__)
+ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="/tmp")
 
 # --- LangGraph Nodes ---
 
@@ -81,9 +84,9 @@ async def critique_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
     --- NGỮ CẢNH TRÍCH XUẤT ---
     {context_text}
 
-    Bạn có thể trả lời câu hỏi của người dùng MỘT CÁCH ĐẦY ĐỦ chỉ dựa trên ngữ cảnh này không?
-    Chỉ trả lời "YES" nếu ngữ cảnh cung cấp thông tin trực tiếp để trả lời.
-    Chỉ trả lời "NO" nếu ngữ cảnh không liên quan hoặc thiếu thông tin quan trọng.
+    Bạn có thể trả lời câu hỏi của người dùng không?
+    Trả lời "YES" nếu ngữ cảnh cung cấp thông tin trực tiếp để trả lời.
+    Trả lời "NO" nếu ngữ cảnh không liên quan hoặc thiếu thông tin quan trọng.
     """
 
     try:
@@ -116,7 +119,7 @@ async def generate_node(state: Dict[str, Any], config: Optional[RunnableConfig])
     context_text = "\n\n".join(docs)
 
     prompt_content = f"""
-    Bạn là một trợ lý AI hữu ích. Dưới đây là các đoạn văn bản được trích xuất từ tài liệu PDF mà người dùng đã tải lên.
+    Bạn là một trợ lý AI hữu ích. Dưới đây là các đoạn văn bản được trích xuất từ các cuốn sách mà người dùng đã tải lên.
 
     --- NGỮ CẢNH (CONTEXT) ---
     {context_text}
@@ -126,6 +129,8 @@ async def generate_node(state: Dict[str, Any], config: Optional[RunnableConfig])
 
     Vui lòng trả lời CHỈ dựa trên nội dung trong ngữ cảnh ở trên. 
     Trả lời một cách tự nhiên và trực tiếp, KHÔNG được bắt đầu bằng các cụm từ như "Theo ngữ cảnh", "Dựa trên tài liệu", hay "Theo thông tin được cung cấp".
+    Khi trả lời, TUYỆT ĐỐI KHÔNG sử dụng bất kỳ ký tự định dạng Markdown nào, bao gồm dấu hoa thị kép (**) để in đậm, dấu gạch dưới (__) để in nghiêng, hoặc dấu gạch ngang (-) cho danh sách không có thứ tự. Chỉ sử dụng danh sách được đánh số hoặc văn bản thuần túy (plain text)
+    Khi tạo danh sách được đánh số, hãy đảm bảo mỗi mục đều được đánh số liên tục và không có dấu xuống dòng thừa giữa số và nội dung.
     Nếu cuối cùng không có kết quả, hãy trả lời: {DEFAULT_RESPONSE}
     """
 
@@ -231,6 +236,9 @@ def enhance_query(llm: ChatGoogleGenerativeAI, original_query: str) -> List[str]
     Đầu ra mong muốn: ['Giải thích về kiến trúc RAG (Retrieval-Augmented Generation)', 'Các thành phần chính của hệ thống RAG', 'Lợi ích của RAG so với fine-tuning']
 
     Đầu ra JSON (3 truy vấn):
+    
+    Chú ý:
+    Nếu câu hỏi yêu cầu tóm tắt một thứ gì đó, hãy trả ra title của thứ đó là 1 trong 3 kết quả
     """
     max_retries = 3
     for attempt in range(max_retries):
@@ -267,9 +275,12 @@ def search_documents(
         enable_reranking: bool = True,
         score_threshold: float = 0.3
 ) -> Tuple[List[str], List[Dict[str, Any]], List[float], Dict[str, Any]]:
+    """
+    Enhanced search pipeline with Multi-query Fusion and FlashRank reranking.
+    Addresses missing positional arguments in SearchResult and optimizes reranker initialization.
+    """
     try:
         collection = get_db_collection()
-
         searcher = DocumentSearcher(
             collection=collection,
             default_k=k,
@@ -278,26 +289,50 @@ def search_documents(
             enable_reranking=enable_reranking
         )
 
-        if filters:
-            results = searcher.search_with_filters(
-                query=queries[0] if queries else "",
-                k=k,
-                filters=filters
-            )
-        elif len(queries) > 1:
-            results = searcher.search_multiple_queries_fusion(
-                queries=queries,
-                k=k
-            )
-        elif len(queries) == 1:
-            results = searcher.language_aware_search(
-                query=queries[0],
-                k=k
-            )
-        else:
-            results = []
+        candidate_k = k * 3 if enable_reranking else k
 
-        final_results = results[:settings.RAG.CONTEXT_TOP_N]
+        results = searcher.search(
+            queries=queries,
+            k=candidate_k,
+            filters=filters
+        )
+
+        if not results:
+            return [], [], [], {}
+
+        if enable_reranking and len(results) > 1:
+            try:
+                ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="/tmp")
+
+                passages = [
+                    {
+                        "id": i,
+                        "text": r.document,
+                        "meta": r.metadata,
+                        "original_score": r.score,
+                        "original_dist": getattr(r, 'distance', 0.0)
+                    }
+                    for i, r in enumerate(results)
+                ]
+
+                rerank_request = RerankRequest(query=queries[0], passages=passages)
+                reranked = ranker.rerank(rerank_request)
+
+                final_results = []
+                for item in reranked[:settings.RAG.CONTEXT_TOP_N]:
+                    final_results.append(SearchResult(
+                        document=item["text"],
+                        metadata=item["meta"],
+                        score=item["score"],
+                        source_id=item["meta"].get("source", "unknown"),
+                        doc_id=str(item["id"]),
+                        distance=item.get("original_dist", 0.0)
+                    ))
+            except Exception as re_err:
+                logger.error(f"Reranking execution error: {re_err}")
+                final_results = results[:settings.RAG.CONTEXT_TOP_N]
+        else:
+            final_results = results[:settings.RAG.CONTEXT_TOP_N]
 
         documents = [r.document for r in final_results]
         metadatas = [r.metadata for r in final_results]
@@ -306,17 +341,15 @@ def search_documents(
         search_stats = searcher.get_search_stats()
         search_stats.update({
             "query_count": len(queries),
-            "child_k_requested": k,
-            "parents_returned": len(documents),
-            "max_context_limit": settings.RAG.CONTEXT_TOP_N,
-            "mode": "hierarchical_parent_retrieval",
-            "strategy_used": strategy
+            "candidates_found": len(results),
+            "rerank_applied": enable_reranking,
+            "final_count": len(documents)
         })
 
         return documents, metadatas, scores, search_stats
 
     except Exception as e:
-        logger.error(f"Error in search_documents: {e}")
+        logger.error(f"Critical error in search_documents: {e}")
         return [], [], [], {"error": str(e)}
 
 
