@@ -1,10 +1,11 @@
+import os
+
 from fastapi import FastAPI, APIRouter
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_google_genai import ChatGoogleGenerativeAI
 from contextlib import asynccontextmanager
 from pathlib import Path
-import os
 
 # Import Project Modules
 from .globals import global_resources, SINGLETON_THREAD_ID, API_PREFIX
@@ -27,7 +28,6 @@ global_resources["SINGLETON_THREAD_ID"] = SINGLETON_THREAD_ID
 # LLM Initialization (before lifespan for agent creation)
 gemini_llm = ChatGoogleGenerativeAI(model=settings.GEMINI.MODEL, api_key=settings.GEMINI.API_KEY)
 global_resources["gemini_llm"] = gemini_llm
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
