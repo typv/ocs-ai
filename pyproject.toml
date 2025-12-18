@@ -30,6 +30,7 @@ fastapi-cli = "0.0.16"
 fastapi-cloud-cli = "0.3.1"
 setuptools-rust = "1.12.0"
 numpy = "2.3.5"
+python-dotenv = "1.2.1"
 
 [tool.poetry.group.dev.dependencies]
 poethepoet = ">=0.38"
