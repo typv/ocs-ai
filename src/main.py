@@ -37,7 +37,12 @@ async def lifespan(app: FastAPI):
     if connector.is_connected():
         print("--- INFO: Connected to ChromaDB successfully. ---")
         global_resources["chroma_client"] = connector.client
-        global_resources["document_collection"] = connector.get_collection(settings.CHROMA.DEFAULT_COLLECTION_NAME)
+        default_collection = connector.get_collection(settings.CHROMA.DEFAULT_COLLECTION_NAME)
+
+        # Delete all data of default_collection
+        # default_collection.delete(where={"source": {"$ne": ""}})
+
+        global_resources["document_collection"] = default_collection
     else:
         print("--- ERROR: FAILED to connect to ChromaDB. RAG will not work. ---")
         global_resources["chroma_client"] = None

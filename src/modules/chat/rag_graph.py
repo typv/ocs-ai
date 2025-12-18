@@ -42,10 +42,7 @@ def retrieve_node(state: RAGState, config: Optional[RunnableConfig]) -> RAGState
     all_queries = [query] + enhanced_queries
 
     # Call the enhanced search_documents function
-    docs, metadatas, scores, search_stats = search_documents(
-        queries=all_queries,
-        k=settings.RAG.RETRIEVAL_K
-    )
+    docs, metadatas, scores, search_stats = search_documents(queries=all_queries)
 
     return {
         "documents": docs,
@@ -264,30 +261,15 @@ def enhance_query(llm: ChatGoogleGenerativeAI, original_query: str) -> List[str]
 
 def search_documents(
         queries: List[str],
-        k: int = 50,
+        k: int = settings.RAG.RETRIEVAL_K,
         strategy: str = "fusion",
         filters: Optional[Dict[str, Any]] = None,
         enable_reranking: bool = True,
         score_threshold: float = 0.3
 ) -> Tuple[List[str], List[Dict[str, Any]], List[float], Dict[str, Any]]:
-    """
-    Enhanced document search with multiple queries and advanced features
-
-    Args:
-        queries: List of search queries
-        k: Number of results to return
-        strategy: Search strategy ("simple", "rerank", "hybrid", "fusion")
-        filters: Optional filters for search
-        enable_reranking: Whether to enable reranking
-        score_threshold: Minimum similarity score threshold
-
-    Returns:
-        Tuple of (documents, metadatas, scores, search_stats)
-    """
     try:
         collection = get_db_collection()
 
-        # Initialize searcher
         searcher = DocumentSearcher(
             collection=collection,
             default_k=k,
@@ -296,26 +278,18 @@ def search_documents(
             enable_reranking=enable_reranking
         )
 
-        # Perform search based on strategy
         if filters:
-            # Use filtered search if filters provided
-            if len(queries) > 0:
-                results = searcher.search_with_filters(
-                    query=queries[0],
-                    k=k,
-                    filters=filters
-                )
-            else:
-                results = []
-        elif len(queries) > 1 and strategy in ["fusion", "hybrid"]:
-            # Use multi-query fusion
+            results = searcher.search_with_filters(
+                query=queries[0] if queries else "",
+                k=k,
+                filters=filters
+            )
+        elif len(queries) > 1:
             results = searcher.search_multiple_queries_fusion(
                 queries=queries,
-                k=k,
-                strategy=SearchStrategy(strategy)
+                k=k
             )
-        elif len(queries) > 0:
-            # Single query search
+        elif len(queries) == 1:
             results = searcher.language_aware_search(
                 query=queries[0],
                 k=k
@@ -323,18 +297,20 @@ def search_documents(
         else:
             results = []
 
-        # Extract results
-        documents = [r.document for r in results]
-        metadatas = [r.metadata for r in results]
-        scores = [r.score for r in results]
+        final_results = results[:settings.RAG.CONTEXT_TOP_N]
 
-        # Get search statistics
+        documents = [r.document for r in final_results]
+        metadatas = [r.metadata for r in final_results]
+        scores = [r.score for r in final_results]
+
         search_stats = searcher.get_search_stats()
         search_stats.update({
             "query_count": len(queries),
-            "results_returned": len(documents),
-            "strategy_used": strategy,
-            "score_threshold_applied": score_threshold
+            "child_k_requested": k,
+            "parents_returned": len(documents),
+            "max_context_limit": settings.RAG.CONTEXT_TOP_N,
+            "mode": "hierarchical_parent_retrieval",
+            "strategy_used": strategy
         })
 
         return documents, metadatas, scores, search_stats
