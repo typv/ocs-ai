@@ -12,7 +12,7 @@ class DocumentSearcher:
     def __init__(
             self,
             collection,
-            default_k: int = 5,
+            default_k: int = settings.RAG.RETRIEVAL_K,
             default_strategy: SearchStrategy = SearchStrategy.FUSION,
             score_threshold: float = 0.3,
             enable_reranking: bool = True,
@@ -71,110 +71,83 @@ class DocumentSearcher:
             logger.error(f"Error retrieving parents: {e}")
             return child_results
 
-    def language_aware_search(
+    def search(
             self,
-            query: str,
-            k: int = settings.RAG.RETRIEVAL_K,
-            **kwargs
-    ) -> List[SearchResult]:
-        if k is None: k = self.default_k
-        where_filter = {"doc_type": "child"}
-
-        if kwargs.get("filter_by_source"):
-            where_filter["source"] = {"$in": kwargs["filter_by_source"]}
-        if kwargs.get("filter_by_book"):
-            where_filter["book_title"] = {"$in": kwargs["filter_by_book"]}
-
-        try:
-            query_results = self.collection.query(
-                query_texts=[query],
-                n_results=k * 2,
-                where=where_filter,
-                include=["documents", "metadatas", "distances"]
-            )
-
-            child_results = []
-            if query_results.get("ids") and query_results["ids"][0]:
-                for i in range(len(query_results["ids"][0])):
-                    dist = query_results["distances"][0][i]
-                    score = self.distance_to_score(dist)
-
-                    if score >= self.score_threshold:
-                        child_results.append(SearchResult(
-                            document=query_results["documents"][0][i],
-                            metadata=query_results["metadatas"][0][i],
-                            score=score,
-                            source_id=query_results["metadatas"][0][i].get("source", "unknown"),
-                            doc_id=query_results["ids"][0][i],
-                            distance=dist
-                        ))
-
-            return self.retrieve_parent_documents(child_results)[:k]
-        except Exception as e:
-            logger.error(f"Search error: {e}")
-            return []
-
-    def search_with_filters(
-            self,
-            query: str,
-            k: int = settings.RAG.RETRIEVAL_K,
+            queries: List[str],
+            k: int = None,
             filters: Optional[Dict[str, Any]] = None,
             **kwargs
     ) -> List[SearchResult]:
+        """
+        Unified search function supporting Multi-query Fusion, Metadata Filtering,
+        Score Boosting, and Hierarchical Parent Retrieval.
+        """
         if k is None: k = self.default_k
-        where_clause = {"doc_type": "child"}
+        if isinstance(queries, str):
+            queries = [queries]
 
+        where_clause = {"doc_type": "child"}
         if filters:
             if filters.get("source_ids"): where_clause["source"] = {"$in": filters["source_ids"]}
             if filters.get("book_titles"): where_clause["book_title"] = {"$in": filters["book_titles"]}
             if filters.get("languages"): where_clause["language"] = {"$in": filters["languages"]}
 
+        if kwargs.get("filter_by_source"):
+            where_clause["source"] = {"$in": kwargs["filter_by_source"]}
+        if kwargs.get("filter_by_book"):
+            where_clause["book_title"] = {"$in": kwargs["filter_by_book"]}
+
         try:
+            num_queries = len(queries)
+            n_results_per_query = k * 5 if num_queries > 1 else k * 2
+
             query_results = self.collection.query(
-                query_texts=[query],
-                n_results=k * 2,
+                query_texts=queries,
+                n_results=n_results_per_query,
                 where=where_clause,
                 include=["documents", "metadatas", "distances"]
             )
 
-            child_results = []
-            if query_results.get("ids") and query_results["ids"][0]:
-                for i in range(len(query_results["ids"][0])):
-                    dist = query_results["distances"][0][i]
+            child_scores = {}
+            child_data = {}
+
+            for query_idx in range(len(query_results["ids"])):
+                for i in range(len(query_results["ids"][query_idx])):
+                    c_id = query_results["ids"][query_idx][i]
+                    dist = query_results["distances"][query_idx][i]
                     score = self.distance_to_score(dist)
+
                     if score >= self.score_threshold:
-                        child_results.append(SearchResult(
-                            document=query_results["documents"][0][i],
-                            metadata=query_results["metadatas"][0][i],
-                            score=score,
-                            source_id=query_results["metadatas"][0][i].get("source", "unknown"),
-                            doc_id=query_results["ids"][0][i],
-                            distance=dist
-                        ))
-            return self.retrieve_parent_documents(child_results)[:k]
+                        if c_id not in child_scores:
+                            child_scores[c_id] = score
+                            child_data[c_id] = {
+                                "doc": query_results["documents"][query_idx][i],
+                                "meta": query_results["metadatas"][query_idx][i],
+                                "dist": dist
+                            }
+                        else:
+                            child_scores[c_id] += (score * 0.3)
+
+            fused_children = [
+                SearchResult(
+                    document=child_data[c_id]["doc"],
+                    metadata=child_data[c_id]["meta"],
+                    score=final_score,
+                    source_id=child_data[c_id]["meta"].get("source", "unknown"),
+                    doc_id=c_id,
+                    distance=child_data[c_id]["dist"]
+                )
+                for c_id, final_score in child_scores.items()
+            ]
+
+            parent_results = self.retrieve_parent_documents(fused_children)
+            parent_results.sort(key=lambda x: x.score, reverse=True)
+
+            return parent_results[:k]
+
         except Exception as e:
-            logger.error(f"Error in filtered search: {e}")
+            logger.error(f"Unified Fusion Search Error: {e}")
             return []
-
-    def search_multiple_queries_fusion(
-            self,
-            queries: List[str],
-            k: int = settings.RAG.RETRIEVAL_K,
-            **kwargs
-    ) -> List[SearchResult]:
-        if k is None: k = self.default_k
-        all_results = []
-        for q in queries:
-            res = self.language_aware_search(q, k=k * 2, **kwargs)
-            all_results.extend(res)
-
-        unique_parents = {}
-        for res in all_results:
-            if res.doc_id not in unique_parents or res.score > unique_parents[res.doc_id].score:
-                unique_parents[res.doc_id] = res
-
-        sorted_results = sorted(unique_parents.values(), key=lambda x: x.score, reverse=True)
-        return sorted_results[:k]
 
     def get_search_stats(self) -> Dict[str, Any]:
         return {"status": "active", "mode": "hierarchical"}
